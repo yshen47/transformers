@@ -28,7 +28,7 @@ from .modeling_utils import PreTrainedModel, SequenceSummary
 logger = logging.getLogger(__name__)
 
 
-class PreTrainedSeq2seq(PreTrainedModel):
+class PreTrainedSeq2seq(nn.Module):
     r"""
         :class:`~transformers.Seq2seq` is a generic model class that will be
         instantiated as a Seq2seq model with one of the base model classes of
