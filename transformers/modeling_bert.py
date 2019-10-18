@@ -851,7 +851,7 @@ class BertForMaskedLM(BertPreTrainedModel):
         if lm_labels is not None:
             # we are doing next-token prediction; shift prediction scores and input ids by one
             prediction_scores = prediction_scores[:, :-1, :]
-            lm_labels = lm_labels[:, 1:, :]
+            lm_labels = lm_labels[:, 1:]
             loss_fct = CrossEntropyLoss(ignore_index=-1)
             seq2seq_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size), lm_labels.view(-1))
             outputs = (seq2seq_loss,) + outputs

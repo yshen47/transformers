@@ -180,7 +180,7 @@ class PreTrainedSeq2seq(nn.Module):
             encoder_outputs = ()
 
         # Decode
-        kwargs_decoder["encoder_hidden_states"] = encoder_hidden_states
+        kwargs_decoder["encoder_hidden_states"] = encoder_hidden_states[None, :, :]
         decoder_outputs = self.decoder(decoder_input_ids, **kwargs_decoder)
 
         return decoder_outputs + encoder_outputs
