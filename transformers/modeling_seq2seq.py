@@ -108,11 +108,16 @@ class PreTrainedSeq2seq(nn.Module):
 
         # Separate the encoder- and decoder- specific kwargs. A kwarg is
         # decoder-specific it the key starts with `decoder_`
-        kwargs_decoder = {}
-        kwargs_encoder = kwargs
-        for key in kwargs_encoder.keys():
-            if key.startswith("decoder_"):
-                kwargs_decoder[key.replace("decoder_", "")] = kwargs_encoder.pop(key)
+        kwargs_encoder = {
+            argument: value
+            for argument, value in kwargs.items()
+            if not argument.startswith("decoder_")
+        }
+        kwargs_decoder = {
+            argument.strip("decoder_"): value
+            for argument, value in kwargs.items()
+            if argument.startswith("decoder_")
+        }
 
         # Load and initialize the encoder and decoder
         #  The distinction between encoder and decoder at the model level is made
@@ -155,11 +160,16 @@ class PreTrainedSeq2seq(nn.Module):
         """
         # Separate the encoder- and decoder- specific kwargs. A kwarg is
         # decoder-specific it the key starts with `decoder_`
-        kwargs_decoder = {}
-        kwargs_encoder = kwargs
-        for key in kwargs_encoder.keys():
-            if key.startswith("decoder_"):
-                kwargs_decoder[key.replace("decoder_", "")] = kwargs_encoder.pop(key)
+        kwargs_encoder = {
+            argument: value
+            for argument, value in kwargs.items()
+            if not argument.startswith("decoder_")
+        }
+        kwargs_decoder = {
+            argument.strip("decoder_"): value
+            for argument, value in kwargs.items()
+            if argument.startswith("decoder_")
+        }
 
         # Encode if needed (training, first prediction pass)
         encoder_hidden_states = kwargs_encoder.pop("encoder_hidden_states", None)
