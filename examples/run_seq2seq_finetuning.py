@@ -309,6 +309,55 @@ def train(args, train_dataset, model, tokenizer):
     return global_step, tr_loss / global_step
 
 
+# This is a template to evaluate perplexity, I still need to go over it
+# carefully
+def evaluate(args, model, tokenizer, prefix=""):
+    eval_output_dir = args.output_dir
+
+    eval_dataset = load_and_cache_examples(args, tokenizer, evaluate=True)
+
+    if not os.path.exists(eval_output_dir) and args.local_rank in [-1, 0]:
+        os.makedirs(eval_output_dir)
+
+    args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
+    # Note that DistributedSampler samples randomly
+    eval_sampler = SequentialSampler(eval_dataset) if args.local_rank == -1 else DistributedSampler(eval_dataset)
+    eval_dataloader = DataLoader(eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size)
+
+    # Eval!
+    logger.info("***** Running evaluation {} *****".format(prefix))
+    logger.info("  Num examples = %d", len(eval_dataset))
+    logger.info("  Batch size = %d", args.eval_batch_size)
+    eval_loss = 0.0
+    nb_eval_steps = 0
+    model.eval()
+
+    for batch in tqdm(eval_dataloader, desc="Evaluating"):
+        batch = batch.to(args.device)
+
+        with torch.no_grad():
+            outputs = model(batch, masked_lm_labels=batch) if args.mlm else model(batch, labels=batch)
+            lm_loss = outputs[0]
+            eval_loss += lm_loss.mean().item()
+        nb_eval_steps += 1
+
+    eval_loss = eval_loss / nb_eval_steps
+    perplexity = torch.exp(torch.tensor(eval_loss))
+
+    result = {
+        "perplexity": perplexity
+    }
+
+    output_eval_file = os.path.join(eval_output_dir, "eval_results.txt")
+    with open(output_eval_file, "w") as writer:
+        logger.info("***** Eval results {} *****".format(prefix))
+        for key in sorted(result.keys()):
+            logger.info("  %s = %s", key, str(result[key]))
+            writer.write("%s = %s\n" % (key, str(result[key])))
+
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser()
 
@@ -339,7 +388,10 @@ def main():
         help="Number of updates steps to accumulate before performing a backward/update pass.",
     )
     parser.add_argument(
-        "--do_train", type=bool, default=False, help="Whether to run training."
+        "--do_evaluate", type=bool, default=False, help="Run model evaluation on out-of-sample data."
+    )
+    parser.add_argument(
+        "--do_train", type=bool, default=False, help="Run training."
     )
     parser.add_argument(
         "--do_overwrite_output",
