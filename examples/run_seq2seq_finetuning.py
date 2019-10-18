@@ -18,18 +18,21 @@
 import argparse
 from collections import deque
 import logging
+import os
 import pickle
 import random
-import os
+import sys
 
 import numpy as np
 from tqdm import tqdm, trange
 import torch
-from torch.utils.data import Dataset, RandomSampler
+from torch.optim import AdamW
+from torch.utils.data import Dataset, DataLoader, RandomSampler
 
-from transformers import AutoTokenizer, Model2Model
+from transformers import AutoTokenizer, Model2Model, WarmupLinearSchedule
 
 logger = logging.getLogger(__name__)
+logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 
 
 def set_seed(args):
@@ -68,11 +71,14 @@ class TextDataset(Dataset):
         if os.path.exists(cached_features_file):
             logger.info("Loading features from cached file %s", cached_features_file)
             with open(cached_features_file, "rb") as source:
-                self.examples = pickle.load(source)
+                examples = pickle.load(source)
+                self.source_examples = examples["source"]
+                self.target_examples = examples["target"]
                 return
 
         logger.info("Creating features from dataset at %s", data_dir)
-        self.examples = []
+        self.source_examples = []
+        self.target_examples = []
         datasets = ["cnn", "dailymail"]
         for dataset in datasets:
             path_to_stories = os.path.join(data_dir, dataset, "stories")
@@ -93,21 +99,28 @@ class TextDataset(Dataset):
 
                 story = tokenizer.encode(story)
                 story_seq = _fit_to_block_size(story, block_size)
+                self.source_examples.append(story_seq)
 
                 summary = tokenizer.encode(summary)
                 summary_seq = _fit_to_block_size(summary, block_size)
-
-                self.examples.append((story_seq, summary_seq))
+                self.target_examples.append(summary_seq)
 
         logger.info("Saving features into cache file %s", cached_features_file)
         with open(cached_features_file, "wb") as sink:
-            pickle.dump(self.examples, sink, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump(
+                {"source": self.source_examples, "target": self.target_examples},
+                sink,
+                protocol=pickle.HIGHEST_PROTOCOL,
+            )
 
     def __len__(self):
-        return len(self.examples)
+        return len(self.source_examples)
 
     def __getitem__(self, items):
-        return torch.tensor(self.examples[items])
+        return (
+            torch.tensor(self.source_examples[items]),
+            torch.tensor(self.target_examples[items]),
+        )
 
 
 def process_story(raw_story):
@@ -171,7 +184,9 @@ def _fit_to_block_size(sequence, block_size):
 
 def mask_padding_tokens(sequence):
     """ Replace the padding token with -1 values """
-    return [s if s != 0 else -1 for s in sequence]
+    padded = sequence.clone()
+    padded[padded == 0] = -1
+    return padded
 
 
 def load_and_cache_examples(args, tokenizer):
@@ -188,10 +203,17 @@ def train(args, train_dataset, model, tokenizer):
     """ Fine-tune the pretrained model on the corpus. """
 
     # Prepare the data loading
-    args.train_bach_size = 1
+    args.train_batch_size = 1
+    device = "cpu"
     train_sampler = RandomSampler(train_dataset)
     train_dataloader = DataLoader(
-        train_dataset, sampler=train_sampler, batch_size=args.train_bach_size
+        train_dataset, sampler=train_sampler, batch_size=args.train_batch_size
+    )
+
+    t_total = (
+        len(train_dataloader)
+        // args.gradient_accumulation_steps
+        * args.num_train_epochs
     )
 
     # Prepare the optimizer and schedule (linear warmup and decay)
@@ -225,11 +247,13 @@ def train(args, train_dataset, model, tokenizer):
     logger.info("***** Running training *****")
     logger.info("  Num examples = %d", len(train_dataset))
     logger.info("  Num Epochs = %d", args.num_train_epochs)
-    logger.info("  Instantaneous batch size per GPU = %d", args.per_gpu_train_batch_size)
-    logger.info("  Total train batch size (w. parallel, distributed & accumulation) = %d",
-        args.train_batch_size
-        * args.gradient_accumulation_steps
-        * (torch.distributed.get_world_size() if args.local_rank != -1 else 1),
+    logger.info(
+        "  Instantaneous batch size per GPU = %d", args.per_gpu_train_batch_size
+    )
+    logger.info(
+        "  Total train batch size (w. parallel, distributed & accumulation) = %d",
+        args.train_batch_size * args.gradient_accumulation_steps
+        # * (torch.distributed.get_world_size() if args.local_rank != -1 else 1),
     )
     logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
     logger.info("  Total optimization steps = %d", t_total)
@@ -242,10 +266,16 @@ def train(args, train_dataset, model, tokenizer):
     for _ in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=True)
         for step, batch in enumerate(epoch_iterator):
-            source = ([s for s, _ in batch]).to(args.device)
-            target = ([t for _, t in batch]).to(args.device)
+            source, target = batch
+            source.to(device)
+            target.to(device)
             model.train()
-            outputs = model(source, target, decoder_lm_labels=mask_padding_tokens(target))
+            outputs = model(
+                source,
+                target,
+                decoder_attention_mask=mask_padding_tokens(target),
+                decoder_lm_labels=mask_padding_tokens(target),
+            )
             loss = outputs[0]
             loss.backward()
 
@@ -260,6 +290,7 @@ def train(args, train_dataset, model, tokenizer):
             if args.max_steps > 0 and global_step > args.max_steps:
                 epoch_iterator.close()
                 break
+            print(tr_loss / global_step)
 
         if args.max_steps > 0 and global_step > args.max_steps:
             train_iterator.close()
@@ -290,6 +321,15 @@ def main():
     # Optional parameters
     parser.add_argument(
         "--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer."
+    )
+    parser.add_argument(
+        "--gradient_accumulation_steps",
+        type=int,
+        default=1,
+        help="Number of updates steps to accumulate before performing a backward/update pass.",
+    )
+    parser.add_argument(
+        "--do_train", type=bool, default=False, help="Whether to run training"
     )
     parser.add_argument(
         "--model_name_or_path",
@@ -324,6 +364,12 @@ def main():
         type=int,
         help="Total number of training epochs to perform.",
     )
+    parser.add_argument(
+        "--per_gpu_train_batch_size",
+        default=4,
+        type=int,
+        help="Batch size per GPU/CPU for training.",
+    )
     parser.add_argument("--seed", default=42, type=int)
     parser.add_argument(
         "--warmup_steps", default=0, type=int, help="Linear warmup over warmup_steps."
@@ -339,22 +385,23 @@ def main():
         )
 
     # Set up training device
-    # device = torch.device("cpu")
+    device = torch.device("cpu")
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
 
     # Set seed
     set_seed(args)
 
     # Load pretrained model and tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
     model = Model2Model.from_pretrained(args.model_name_or_path)
-    # model.to(device)
+    model.to(device)
 
     logger.info("Training/evaluation parameters %s", args)
 
     # Training
-    train_dataset = load_and_cache_examples(args, tokenizer)
-    global_step, tr_loss = train(args, train_dataset, model, tokenizer)
-    # logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
+    if args.do_train:
+        train_dataset = load_and_cache_examples(args, tokenizer)
+        global_step, tr_loss = train(args, train_dataset, model, tokenizer)
+        logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
 
 if __name__ == "__main__":
