@@ -329,7 +329,13 @@ def main():
         help="Number of updates steps to accumulate before performing a backward/update pass.",
     )
     parser.add_argument(
-        "--do_train", type=bool, default=False, help="Whether to run training"
+        "--do_train", type=bool, default=False, help="Whether to run training."
+    )
+    parser.add_argument(
+        "--do_overwrite_output",
+        type=bool,
+        default=False,
+        help="Whether to overwrite the output dir.",
     )
     parser.add_argument(
         "--model_name_or_path",
@@ -359,6 +365,9 @@ def main():
         help="If > 0: set total number of training steps to perform. Override num_train_epochs.",
     )
     parser.add_argument(
+        "--to_cpu", default=False, type=bool, help="Whether to force training on CPU."
+    )
+    parser.add_argument(
         "--num_train_epochs",
         default=1,
         type=int,
@@ -383,25 +392,70 @@ def main():
         raise ValueError(
             "Only the BERT architecture is currently supported for seq2seq."
         )
+    if (
+        os.path.exists(args.output_dir)
+        and os.listdir(args.output_dir)
+        and args.do_train
+        and not args.overwrite_output_dir
+    ):
+        raise ValueError(
+            "Output directory ({}) already exists and is not empty. Use --overwrite_output_dir to overwrite.".format(
+                args.output_dir
+            )
+        )
 
     # Set up training device
-    device = torch.device("cpu")
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
+    if args.to_cpu or not torch.cuda.is_available():
+        args.device = torch.device("cpu")
+        args.n_gpu = 0
+    else:
+        args.device = torch.device("cpu")
+        args.n_gpu = torch.cuda.device_count()
 
     # Set seed
     set_seed(args)
 
     # Load pretrained model and tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
     model = Model2Model.from_pretrained(args.model_name_or_path)
-    model.to(device)
+
+    # Setup logging
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        level=logging.INFO,
+    )
+    logger.warning(
+        "Process rank: %s, device: %s, n_gpu: %s, distributed training: %s, 16-bits training: %s",
+        0,
+        args.device,
+        args.n_gpu,
+        False,
+        False,
+    )
 
     logger.info("Training/evaluation parameters %s", args)
 
     # Training
+    model.to(args.device)
     if args.do_train:
         train_dataset = load_and_cache_examples(args, tokenizer)
         global_step, tr_loss = train(args, train_dataset, model, tokenizer)
         logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
+
+        if not os.path.exists(args.output_dir):
+            os.makedirs(args.output_dir)
+
+        logger.info("Saving model checkpoint to %s", args.output_dir)
+
+        # Save a trained model, configuration and tokenizer using `save_pretrained()`.
+        # They can then be reloaded using `from_pretrained()`
+        model_to_save = (
+            model.module if hasattr(model, "module") else model
+        )  # Take care of distributed/parallel training
+        model_to_save.save_pretrained(args.output_dir)
+        tokenizer.save_pretrained(args.output_dir)
+        torch.save(args, os.path.join(args.output_dir, "training_arguments.bin"))
 
 
 if __name__ == "__main__":
