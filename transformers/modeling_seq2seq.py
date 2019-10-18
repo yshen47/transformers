@@ -17,13 +17,12 @@
 from __future__ import absolute_import, division, print_function, unicode_literals
 
 import logging
+import os
 
 import torch
 from torch import nn
 
-from .file_utils import add_start_docstrings
 from .modeling_auto import AutoModel, AutoModelWithLMHead
-from .modeling_utils import PreTrainedModel, SequenceSummary
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +138,12 @@ class PreTrainedSeq2seq(nn.Module):
         model = cls(encoder, decoder)
 
         return model
+
+    def save_pretrained(self, save_directory):
+        """ Save a Seq2Seq model and its configuration file in a format
+        such that it can be loaded using `:func:`~transformers.PreTrainedSeq2seq.from_pretrained` """
+        self.encoder.save_pretrained(os.path.join(save_directory, "encoder"))
+        self.decoder.save_pretrained(os.path.join(save_directory, "decoder"))
 
     def forward(self, encoder_input_ids, decoder_input_ids, **kwargs):
         """ The forward pass on a seq2eq depends what we are performing:

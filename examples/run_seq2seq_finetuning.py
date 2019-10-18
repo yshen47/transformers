@@ -29,7 +29,7 @@ import torch
 from torch.optim import AdamW
 from torch.utils.data import Dataset, DataLoader, RandomSampler
 
-from transformers import AutoTokenizer, Model2Model, WarmupLinearSchedule
+from transformers import AutoTokenizer, PreTrainedSeq2seq, Model2Model, WarmupLinearSchedule
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
@@ -208,10 +208,10 @@ def train(args, train_dataset, model, tokenizer):
     train_dataloader = DataLoader(
         train_dataset, sampler=train_sampler, batch_size=args.train_batch_size
     )
-    
+
     if args.max_steps > 0:
         t_total = args.max_steps
-        arg.num_train_epochs = (
+        args.num_train_epochs = (
             t_total
             // ( len(train_dataloader) // args.gradient_accumulation_steps + 1))
     else:
@@ -446,7 +446,7 @@ def main():
 
     logger.info("Training/evaluation parameters %s", args)
 
-    # Training
+    # Train the model
     model.to(args.device)
     if args.do_train:
         train_dataset = load_and_cache_examples(args, tokenizer)
@@ -466,6 +466,20 @@ def main():
         model_to_save.save_pretrained(args.output_dir)
         tokenizer.save_pretrained(args.output_dir)
         torch.save(args, os.path.join(args.output_dir, "training_arguments.bin"))
+
+    # Evaluate the model
+    results = {}
+    if args.do_eval:
+        checkpoints = []
+        logger.info("Evaluate the following checkpoints: %s", checkpoints)
+        for checkpoint in checkpoints:
+            encoder_checkpoint = os.path.join(checkpoint, "encoder")
+            decoder_checkpoint = os.path.join(checkpoint, "decoder")
+            model = PreTrainedSeq2Seq.from_pretrained(encoder_checkpoint, decoder_checkpoint)
+            model.to(args.device)
+            results = "placeholder"
+
+    return results
 
 
 if __name__ == "__main__":
