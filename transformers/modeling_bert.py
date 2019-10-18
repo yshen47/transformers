@@ -838,11 +838,8 @@ class BertForMaskedLM(BertPreTrainedModel):
         # 1. If a tensor that contains the indices of masked labels is provided,
         #    the cross-entropy is the MLM cross-entropy that measures the likelihood
         #    of predictions for masked words.
-        # 2. If encoder hidden states are provided we are in a causal situation where we
+        # 2. If `lm_label` is provided we are in a causal scenario where we
         #    try to predict the next word for each input in the encoder.
-        if masked_lm_labels is not None and lm_labels is not None:
-            raise AttributeError("Masked LM training with an encoder-decoder is not supported.")
-
         if masked_lm_labels is not None:
             loss_fct = CrossEntropyLoss(ignore_index=-1)  # -1 index = padding token
             masked_lm_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size), masked_lm_labels.view(-1))
