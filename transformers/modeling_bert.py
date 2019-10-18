@@ -819,7 +819,7 @@ class BertForMaskedLM(BertPreTrainedModel):
                                    self.bert.embeddings.word_embeddings)
 
     def forward(self, input_ids, attention_mask=None, token_type_ids=None, position_ids=None, head_mask=None,
-                masked_lm_labels=None, lm_labels=None, encoder_hidden_states=None, encoder_attention_mask=None):
+                masked_lm_labels=None, encoder_hidden_states=None, encoder_attention_mask=None, lm_labels=None, ):
 
         outputs = self.bert(input_ids,
                             attention_mask=attention_mask,
