@@ -475,7 +475,7 @@ def main():
         for checkpoint in checkpoints:
             encoder_checkpoint = os.path.join(checkpoint, "encoder")
             decoder_checkpoint = os.path.join(checkpoint, "decoder")
-            model = PreTrainedSeq2Seq.from_pretrained(encoder_checkpoint, decoder_checkpoint)
+            model = PreTrainedSeq2seq.from_pretrained(encoder_checkpoint, decoder_checkpoint)
             model.to(args.device)
             results = "placeholder"
 
