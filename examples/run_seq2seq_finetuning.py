@@ -203,18 +203,23 @@ def train(args, train_dataset, model, tokenizer):
     """ Fine-tune the pretrained model on the corpus. """
 
     # Prepare the data loading
-    args.train_batch_size = 1
-    device = "cpu"
+    args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
     train_sampler = RandomSampler(train_dataset)
     train_dataloader = DataLoader(
         train_dataset, sampler=train_sampler, batch_size=args.train_batch_size
     )
-
-    t_total = (
-        len(train_dataloader)
-        // args.gradient_accumulation_steps
-        * args.num_train_epochs
-    )
+    
+    if args.max_steps > 0:
+        t_total = args.max_steps
+        arg.num_train_epochs = (
+            t_total
+            // ( len(train_dataloader) // args.gradient_accumulation_steps + 1))
+    else:
+        t_total = (
+            len(train_dataloader)
+            // args.gradient_accumulation_steps
+            * args.num_train_epochs
+        )
 
     # Prepare the optimizer and schedule (linear warmup and decay)
     no_decay = ["bias", "LayerNorm.weight"]
@@ -267,16 +272,22 @@ def train(args, train_dataset, model, tokenizer):
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=True)
         for step, batch in enumerate(epoch_iterator):
             source, target = batch
-            source.to(device)
-            target.to(device)
+            labels = mask_padding_tokens(target)
+            source = source.to(args.device)
+            target = target.to(args.device)
+            labels = labels.to(args.device)
             model.train()
             outputs = model(
                 source,
                 target,
-                decoder_attention_mask=mask_padding_tokens(target),
-                decoder_lm_labels=mask_padding_tokens(target),
+                decoder_attention_mask=labels,
+                decoder_lm_labels=labels,
             )
+
             loss = outputs[0]
+            if args.gradient_accumulation_steps > 1:
+                loss /= args.gradient_accumulation_steps
+
             loss.backward()
 
             tr_loss += loss.item()
@@ -290,7 +301,6 @@ def train(args, train_dataset, model, tokenizer):
             if args.max_steps > 0 and global_step > args.max_steps:
                 epoch_iterator.close()
                 break
-            print(tr_loss / global_step)
 
         if args.max_steps > 0 and global_step > args.max_steps:
             train_iterator.close()
