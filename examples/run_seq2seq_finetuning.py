@@ -275,7 +275,7 @@ def train(args, model, tokenizer):
     train_iterator = trange(args.num_train_epochs, desc="Epoch", disable=True)
 
     global_step = 0
-    tr_loss, logging_loss = 0.0, 0.0
+    tr_loss = 0.0
     for _ in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=True)
         for step, batch in enumerate(epoch_iterator):
@@ -496,9 +496,6 @@ def main():
     else:
         args.device = torch.device("cpu")
         args.n_gpu = torch.cuda.device_count()
-
-    # Set seed
-    set_seed(args)
 
     # Load pretrained model and tokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
