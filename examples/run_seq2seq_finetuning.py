@@ -29,7 +29,12 @@ import torch
 from torch.optim import AdamW
 from torch.utils.data import Dataset, DataLoader, RandomSampler
 
-from transformers import AutoTokenizer, PreTrainedSeq2seq, Model2Model, WarmupLinearSchedule
+from transformers import (
+    AutoTokenizer,
+    PreTrainedSeq2seq,
+    Model2Model,
+    WarmupLinearSchedule,
+)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
@@ -199,21 +204,23 @@ def load_and_cache_examples(args, tokenizer):
 # ------------
 
 
-def train(args, train_dataset, model, tokenizer):
+def train(args, model, tokenizer):
     """ Fine-tune the pretrained model on the corpus. """
 
-    # Prepare the data loading
+    # Load the data
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
+    train_dataset = load_and_cache_examples(args, tokenizer)
     train_sampler = RandomSampler(train_dataset)
     train_dataloader = DataLoader(
         train_dataset, sampler=train_sampler, batch_size=args.train_batch_size
     )
 
+    # Training schedule
     if args.max_steps > 0:
         t_total = args.max_steps
-        args.num_train_epochs = (
-            t_total
-            // ( len(train_dataloader) // args.gradient_accumulation_steps + 1))
+        args.num_train_epochs = t_total // (
+            len(train_dataloader) // args.gradient_accumulation_steps + 1
+        )
     else:
         t_total = (
             len(train_dataloader)
@@ -263,28 +270,35 @@ def train(args, train_dataset, model, tokenizer):
     logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
     logger.info("  Total optimization steps = %d", t_total)
 
-    global_step = 0
-    tr_loss, logging_loss = 0.0, 0.0
+    set_seed(args)
     model.zero_grad()
     train_iterator = trange(args.num_train_epochs, desc="Epoch", disable=True)
-    set_seed(args)
+
+    global_step = 0
+    tr_loss, logging_loss = 0.0, 0.0
     for _ in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=True)
         for step, batch in enumerate(epoch_iterator):
+            # load the data on device
             source, target = batch
-            labels = mask_padding_tokens(target)
-            source = source.to(args.device)
-            target = target.to(args.device)
-            labels = labels.to(args.device)
+            labels_src = mask_padding_tokens(source)
+            labels_tgt = mask_padding_tokens(target)
+            source.to(args.device)
+            target.to(args.device)
+            labels_src.to(args.device)
+            labels_tgt.to(args.device)
+            # forward pass
             model.train()
             outputs = model(
                 source,
                 target,
-                decoder_attention_mask=labels,
-                decoder_lm_labels=labels,
+                decoder_encoder_attention_mask=labels_src,
+                decoder_attention_mask=labels_tgt,
+                decoder_lm_labels=labels_tgt,
             )
 
             loss = outputs[0]
+            print(loss)
             if args.gradient_accumulation_steps > 1:
                 loss /= args.gradient_accumulation_steps
 
@@ -316,13 +330,19 @@ def evaluate(args, model, tokenizer, prefix=""):
 
     eval_dataset = load_and_cache_examples(args, tokenizer, evaluate=True)
 
-    if not os.path.exists(eval_output_dir) and args.local_rank in [-1, 0]:
+    if not os.path.exists(eval_output_dir):
         os.makedirs(eval_output_dir)
 
     args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
     # Note that DistributedSampler samples randomly
-    eval_sampler = SequentialSampler(eval_dataset) if args.local_rank == -1 else DistributedSampler(eval_dataset)
-    eval_dataloader = DataLoader(eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size)
+    eval_sampler = (
+        SequentialSampler(eval_dataset)
+        if args.local_rank == -1
+        else DistributedSampler(eval_dataset)
+    )
+    eval_dataloader = DataLoader(
+        eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size
+    )
 
     # Eval!
     logger.info("***** Running evaluation {} *****".format(prefix))
@@ -336,7 +356,11 @@ def evaluate(args, model, tokenizer, prefix=""):
         batch = batch.to(args.device)
 
         with torch.no_grad():
-            outputs = model(batch, masked_lm_labels=batch) if args.mlm else model(batch, labels=batch)
+            outputs = (
+                model(batch, masked_lm_labels=batch)
+                if args.mlm
+                else model(batch, labels=batch)
+            )
             lm_loss = outputs[0]
             eval_loss += lm_loss.mean().item()
         nb_eval_steps += 1
@@ -344,9 +368,7 @@ def evaluate(args, model, tokenizer, prefix=""):
     eval_loss = eval_loss / nb_eval_steps
     perplexity = torch.exp(torch.tensor(eval_loss))
 
-    result = {
-        "perplexity": perplexity
-    }
+    result = {"perplexity": perplexity}
 
     output_eval_file = os.path.join(eval_output_dir, "eval_results.txt")
     with open(output_eval_file, "w") as writer:
@@ -388,11 +410,12 @@ def main():
         help="Number of updates steps to accumulate before performing a backward/update pass.",
     )
     parser.add_argument(
-        "--do_evaluate", type=bool, default=False, help="Run model evaluation on out-of-sample data."
+        "--do_evaluate",
+        type=bool,
+        default=False,
+        help="Run model evaluation on out-of-sample data.",
     )
-    parser.add_argument(
-        "--do_train", type=bool, default=False, help="Run training."
-    )
+    parser.add_argument("--do_train", type=bool, default=False, help="Run training.")
     parser.add_argument(
         "--do_overwrite_output",
         type=bool,
@@ -501,8 +524,7 @@ def main():
     # Train the model
     model.to(args.device)
     if args.do_train:
-        train_dataset = load_and_cache_examples(args, tokenizer)
-        global_step, tr_loss = train(args, train_dataset, model, tokenizer)
+        global_step, tr_loss = train(args, model, tokenizer)
         logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
         if not os.path.exists(args.output_dir):
@@ -527,7 +549,9 @@ def main():
         for checkpoint in checkpoints:
             encoder_checkpoint = os.path.join(checkpoint, "encoder")
             decoder_checkpoint = os.path.join(checkpoint, "decoder")
-            model = PreTrainedSeq2seq.from_pretrained(encoder_checkpoint, decoder_checkpoint)
+            model = PreTrainedSeq2seq.from_pretrained(
+                encoder_checkpoint, decoder_checkpoint
+            )
             model.to(args.device)
             results = "placeholder"
 
