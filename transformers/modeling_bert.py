@@ -660,6 +660,13 @@ class BertModel(BertPreTrainedModel):
         extended_attention_mask = extended_attention_mask.to(dtype=next(self.parameters()).dtype)  # fp16 compatibility
         extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
 
+        # If a 2D encoder attention mask is provided for the cross-attention
+        # we need to make broadcastabe to [batch_size, num_heads, seq_length, seq_length]
+        if encoder_attention_mask is not None:
+            encoder_attention_mask = encoder_attention_mask[:, None, None, :]
+            encoder_attention_mask = encoder_attention_mask.to(dtype=next(self.parameters()).dtype)  # fp16 compatibility
+            encoder_attention_mask = (1.0 - encoder_attention_mask) * -10000.0
+
         # Prepare head mask if needed
         # 1.0 in head_mask indicate we keep the head
         # attention_probs has shape bsz x n_heads x N x N

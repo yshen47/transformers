@@ -163,7 +163,6 @@ class PreTrainedSeq2seq(nn.Module):
             decoder_input_ids: ``torch.LongTensor`` of shape ``(batch_size, sequence_length)``
                 Indices of decoder input sequence tokens in the vocabulary.
         """
-        print(kwargs)
         # Separate the encoder- and decoder- specific kwargs. A kwarg is
         # decoder-specific it the key starts with `decoder_`
         kwargs_encoder = {
@@ -186,7 +185,6 @@ class PreTrainedSeq2seq(nn.Module):
             encoder_outputs = ()
 
         # Decode
-        print(kwargs_decoder)
         kwargs_decoder["encoder_hidden_states"] = encoder_hidden_states[None, :, :]
         decoder_outputs = self.decoder(decoder_input_ids, **kwargs_decoder)
 
