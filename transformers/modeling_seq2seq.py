@@ -219,6 +219,12 @@ class Model2Model(PreTrainedSeq2seq):
         model = super(Model2Model, cls).from_pretrained(encoder_pretrained_model_name_or_path=pretrained_model_name_or_path,
                                                         decoder_pretrained_model_name_or_path=pretrained_model_name_or_path,
                                                         **kwargs)
+
+        # Some architectures require for the decoder to be initialized randomly
+        # before fine-tuning.
+        if kwargs.get("decoder_initialize_randomly", False):
+            model.decoder.init_weights()
+
         return model
 
 
