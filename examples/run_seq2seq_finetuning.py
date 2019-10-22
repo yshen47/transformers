@@ -27,7 +27,7 @@ import numpy as np
 from tqdm import tqdm, trange
 import torch
 from torch.optim import AdamW
-from torch.utils.data import Dataset, DataLoader, RandomSampler
+from torch.utils.data import Dataset, DataLoader, RandomSampler, SequentialSampler
 
 from transformers import (
     AutoTokenizer,
@@ -159,9 +159,10 @@ def process_story(raw_story):
     # gather summary lines
     highlights_lines = list(filter(lambda t: not t.startswith("@highlight"), lines))
 
-    # join the lines
-    story = " ".join(story_lines)
-    summary = " ".join(highlights_lines)
+    # join the lines. This sequence is specific to Lapata & Liu (2019).
+    # Edit when you are adding a new model.
+    story = " [SEP] [CLS] ".join(story_lines)
+    summary = " [SEP] [CLS] ".join(highlights_lines)
 
     return story, summary
 
@@ -206,6 +207,7 @@ def load_and_cache_examples(args, tokenizer):
 
 def train(args, model, tokenizer):
     """ Fine-tune the pretrained model on the corpus. """
+    set_seed(args)
 
     # Load the data
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
@@ -270,7 +272,6 @@ def train(args, model, tokenizer):
     logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
     logger.info("  Total optimization steps = %d", t_total)
 
-    set_seed(args)
     model.zero_grad()
     train_iterator = trange(args.num_train_epochs, desc="Epoch", disable=True)
 
@@ -323,28 +324,21 @@ def train(args, model, tokenizer):
     return global_step, tr_loss / global_step
 
 
-# This is a template to evaluate perplexity, I still need to go over it
-# carefully
+# ------------
+# Train
+# ------------
+
+
 def evaluate(args, model, tokenizer, prefix=""):
-    eval_output_dir = args.output_dir
-
-    eval_dataset = load_and_cache_examples(args, tokenizer, evaluate=True)
-
-    if not os.path.exists(eval_output_dir):
-        os.makedirs(eval_output_dir)
+    set_seed(args)
 
     args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
-    # Note that DistributedSampler samples randomly
-    eval_sampler = (
-        SequentialSampler(eval_dataset)
-        if args.local_rank == -1
-        else DistributedSampler(eval_dataset)
-    )
+    eval_dataset = load_and_cache_examples(args, tokenizer, evaluate=True)
+    eval_sampler = SequentialSampler(eval_dataset)
     eval_dataloader = DataLoader(
         eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size
     )
 
-    # Eval!
     logger.info("***** Running evaluation {} *****".format(prefix))
     logger.info("  Num examples = %d", len(eval_dataset))
     logger.info("  Batch size = %d", args.eval_batch_size)
@@ -353,13 +347,23 @@ def evaluate(args, model, tokenizer, prefix=""):
     model.eval()
 
     for batch in tqdm(eval_dataloader, desc="Evaluating"):
-        batch = batch.to(args.device)
+        source, target = batch
+        labels_src = mask_padding_tokens(source)
+        labels_tgt = mask_padding_tokens(target)
+        source.to(args.device)
+        target.to(args.device)
+        labels_src.to(args.device)
+        labels_tgt.to(args.device)
 
         with torch.no_grad():
             outputs = (
-                model(batch, masked_lm_labels=batch)
-                if args.mlm
-                else model(batch, labels=batch)
+                model(
+                    source,
+                    target,
+                    decoder_encoder_attention_mask=labels_src,
+                    decoder_attention_mask=labels_tgt,
+                    decoder_lm_labels=labels_tgt,
+                )
             )
             lm_loss = outputs[0]
             eval_loss += lm_loss.mean().item()
@@ -370,7 +374,11 @@ def evaluate(args, model, tokenizer, prefix=""):
 
     result = {"perplexity": perplexity}
 
-    output_eval_file = os.path.join(eval_output_dir, "eval_results.txt")
+    # Save the evaluation's results
+    output_eval_file = os.path.join(args.output_dir, "eval_results.txt")
+    if not os.path.exists(args.output_dir):
+        os.makedirs(args.output_dir)
+
     with open(output_eval_file, "w") as writer:
         logger.info("***** Eval results {} *****".format(prefix))
         for key in sorted(result.keys()):
