@@ -63,7 +63,7 @@ class DataLoaderTest(unittest.TestCase):
 
         expected_story = (
             "It was the year of Our Lord one thousand seven hundred and "
-            "seventy-five. Spiritual revelations were conceded to England at that "
+            "seventy-five. [SEP] [CLS] Spiritual revelations were conceded to England at that "
             "favoured period, as at this."
         )
         self.assertEqual(expected_story, story)
