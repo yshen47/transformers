@@ -1,12 +1,32 @@
 # coding=utf-8
-""" A general wrapper around models with LM heads to
-perform beam search.
+# Copyright (c) 2019 Yang Liu
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
 """
-
+A general wrapper around models with LM heads to generate sequences
+using beam search.
+"""
 import torch
+from torch import nn
 
 
-class ModelWithBeamSearch(object):
+class ModelWithBeamSearch(nn.Module):
     def __init__(
         self,
         model,
@@ -17,6 +37,7 @@ class ModelWithBeamSearch(object):
         min_length,
         max_length,
         alpha,
+        block_trigram=True,
     ):
         """
         Attributes:
@@ -31,6 +52,7 @@ class ModelWithBeamSearch(object):
         self.min_length = min_length
         self.max_length = max_length
         self.alpha = alpha
+        self.block_trigram = block_trigram
 
     def forward(self, input_ids, **kwargs):
         # Separate the encoder- and decoder- specific kwargs. A kwarg is
@@ -46,38 +68,45 @@ class ModelWithBeamSearch(object):
             if argument.startswith("decoder_")
         }
 
-        # forward pass on the encoder
-        encoder_outputs = self.encoder(input_ids, kwargs_encoder)
+        batch_size, _ = input_ids.size(0)
 
-        # initialize variables
-        batch_size, _ = input_ids.size()
+        # Variables that keep track of the status of the search
+        hypotheses = [[] for _ in range(batch_size)]
+        batch_offset = torch.arange(batch_size, dtype=torch.long)
+        beam_offset = torch.arange(
+            0,
+            batch_size * self.beam_size,
+            step=self.beam_size,
+            dtype=torch.long,
+        )
+        growing_beam = torch.full(
+            (batch_size * self.beam_size, 1),
+            self.start_token,
+            dtype=torch.long,
+        )
         topk_log_probabilities = torch.tensor(
-            [0.0] + [float("-inf")] * (self.beam_size - 1)
+            [0.0] + [float("-inf")] * (self.beam_size - 1),
+            dtype=torch.float,
         ).repeat(batch_size)
+
+        # Forward pass on the encoder
+        encoder_outputs = self.encoder(input_ids, kwargs_encoder)
+        kwargs_decoder["encoder_hidden_states"] = tile(
+            encoder_outputs, self.beam_size, dim=0
+        )
 
         results = {}
         results["predictions"] = [[] for _ in batch_size]
         results["scores"] = [[] for _ in batch_size]
 
-        # For each batch we need to make `beam_size` predictions at each step.
-        # We thus need to repeat the encoder hidden states `beam_size` times.
-        kwargs_decoder["encoder_hidden_states"] = tile(
-            encoder_outputs, self.beam_size, dim=0
-        )
-        beam_offset = torch.arange(
-            0, batch_size * self.beam_size, step=self.beam_size, dtype=torch.long
-        )
-        hypotheses = [[] for _ in range(batch_size)]
-        batch_offset = torch.arange(batch_size, dtype=torch.long)
-        growing_sequence = torch.full(
-            (self.batch_size * self.beam_size, 1), self.start_token, dtype=torch.long
-        )
-
         for step in range(self.max_length):
-            decoder_input = growing_sequence[:, -1]
+            decoder_input = growing_beam[:, -1]
             outputs = self.decoder(decoder_input, kwargs_decoder)
             log_probabilities = torch.nn.functional.log_softmax(outputs[1])
             vocab_size = log_probabilities.size(-1)
+
+            # The batch size changes as some beams finish so we define:
+            _B = log_probabilities.size(0) // self.beam_size
 
             # Multiply each beam probability with the probability of the
             # next token (conditioned on the words in the beam).
@@ -88,14 +117,22 @@ class ModelWithBeamSearch(object):
             if step < self.min_length:
                 log_probabilities[self.end_token] = -1e20
 
-            # TODO: remove trigrams
+            # Remove repeating tri-grams
+            if(self.args.block_trigram):
+                if(step + 1 > 3):
+                    for i in range(_B * self.beam_size):
+                        tokens = [t for t in growing_beam[i]]
+                        trigrams = [(tokens[i-1], tokens[i], tokens[i+1]) for i in range(1, len(words) - 1)]
+                        last_trigram = tuple(trigrams[-1])
+                        if last_trigram in trigrams[:-1]:
+                            log_probabilities[i] = -1e20
 
             # Find the `beam_size` (previous_beam + token) combinations with
             # the highest score
             topk_log_probabilities, topk_ids = log_probabilities.topk(
-                log_probabilities.view(-1, self.beam_size * vocab_size),
+                log_probabilities.view(_B, self.beam_size * vocab_size),
                 self.beam_size,
-                dim=-1
+                dim=1
             )
 
             # Apply the length penalty. The +1 accounts for the [EOS] token
@@ -111,13 +148,13 @@ class ModelWithBeamSearch(object):
             # Retrieve the row index of the surviving beams in the original
             # view of the log_probabilities tensor
             surviving_beams_rows = (
-                topk_beam_ids + beam_offset[: topk_beam_ids.size(0)].view(-1, 1)
+                topk_beam_ids + beam_offset[:_B].view(-1, 1)
             ).view(-1)
 
             # Append the last predictions
-            growing_sequence = torch.cat(
+            growing_beam = torch.cat(
                 [
-                    growing_sequence.index_select(0, surviving_beams_rows),
+                    growing_beam.index_select(0, surviving_beams_rows),
                     topk_token_ids.view(-1, 1),
                 ],
                 1,
@@ -133,7 +170,7 @@ class ModelWithBeamSearch(object):
 
             # Save the finished searches
             if is_finished.any():
-                predictions = growing_sequence.view(-1, self.beam_size, growing_sequence.size(-1))
+                predictions = growing_beam.view(-1, self.beam_size, growing_beam.size(1))
                 for i in range(is_finished.size(0)):
                     if is_top_beam_finished[i]:
                         is_finished[i].fill_(1)
@@ -160,17 +197,16 @@ class ModelWithBeamSearch(object):
 
                 # Remove finished batches for the next step.
                 topk_log_probabilities = topk_log_probabilities.index_select(0, non_finished)
-                batch_index = batch_index.index_select(0, non_finished)
                 batch_offset = batch_offset.index_select(0, non_finished)
-                growing_sequence = predictions.index_select(0, non_finished).view(
-                    -1, growing_sequence.size(-1)
+                growing_beam = predictions.index_select(0, non_finished).view(
+                    -1, growing_beam.size(-1)
                 )
 
             # Re-order the state for the next pass
-            select_indices = batch_index.view(-1)
+            surviving_beams_rows = surviving_beams_rows.index_select(0, non_finished)
             kwargs_decoder["encoder_hidden_states"] = kwargs_decoder[
                 "encoder_hidden_states"
-            ].index_select(0, select_indices)
+            ].index_select(0, surviving_beams_rows)
 
         return results
 
