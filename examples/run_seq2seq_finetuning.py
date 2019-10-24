@@ -33,7 +33,6 @@ from transformers import (
     AutoTokenizer,
     PreTrainedSeq2seq,
     Model2Model,
-    WarmupLinearSchedule,
 )
 
 logger = logging.getLogger(__name__)
@@ -200,7 +199,7 @@ def load_and_cache_examples(args, tokenizer):
     return dataset
 
 
-def compute_token_type_embedding(sequence, separator="[CLS]"):
+def compute_token_type_ids(sequence, separator="[CLS]"):
     """ Segment embeddings as described in [1]
 
     The values {0,1} were obtained from the repository [2].
@@ -334,19 +333,22 @@ def train(args, model, tokenizer):
     for _ in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=True)
         for step, batch in enumerate(epoch_iterator):
-            # load the data on device
-            source, target, token_type_embedding = batch
+            source, target = batch
+            token_type_ids = compute_token_type_ids(source)
             labels_src = mask_padding_tokens(source)
             labels_tgt = mask_padding_tokens(target)
+
             source.to(args.device)
             target.to(args.device)
+            token_type_ids.to(args.device)
             labels_src.to(args.device)
             labels_tgt.to(args.device)
-            # forward pass
+
             model.train()
             outputs = model(
                 source,
                 target,
+                token_type_ids=token_type_ids,
                 decoder_encoder_attention_mask=labels_src,
                 decoder_attention_mask=labels_tgt,
                 decoder_lm_labels=labels_tgt,
@@ -363,7 +365,6 @@ def train(args, model, tokenizer):
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
                 optimizer.step()
-                scheduler.step()
                 model.zero_grad()
                 global_step += 1
 
