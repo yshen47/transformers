@@ -26,7 +26,7 @@ import sys
 import numpy as np
 from tqdm import tqdm, trange
 import torch
-from torch.optim import AdamW
+from torch.optim import Adam
 from torch.utils.data import Dataset, DataLoader, RandomSampler, SequentialSampler
 
 from transformers import (
@@ -218,6 +218,64 @@ def compute_token_type_embedding(sequence, separator="[CLS]"):
     return embeddings
 
 
+# ----------
+# Optimizers
+# ----------
+
+
+class BertSumOptimizer(object):
+    """ Specific optimizer for BertSum.
+
+    As described in [1], the authors fine-tune BertSum for abstractive
+    summarization using two Adam Optimizers with different warm-up steps and
+    learning rate. They also use a custom learning rate scheduler.
+
+    [1] Liu, Yang, and Mirella Lapata. "Text summarization with pretrained encoders."
+        arXiv preprint arXiv:1908.08345 (2019).
+    """
+
+    def __init__(self, model, lr, warmup_steps, beta_1=0.99, beta_2=0.999, eps=1e-9):
+        self.encoder = model.encoder
+        self.decoder = model.decoder
+        self.lr = lr
+        self.warmup_steps = lr.warmup_steps
+
+        self.optimizers = {
+            "encoder": Adam(
+                parameters=model.encoder.parameters(),
+                lr=lr["encoder"],
+                betas=(self.beta_1, self.beta_2),
+                eps=eps,
+            ),
+            "decoder": Adam(
+                parameters=model.decoder.parameters(),
+                lr=lr["decoder"],
+                betas=(self.beta_1, self.beta_2),
+                eps=eps,
+            ),
+        }
+
+        self._step = 0
+
+    def _update_rate(self, stack):
+        return self.lr["stack"] * min(
+            self._step ** (-0.5),
+            self._step * self.warmup_steps["stack"] ** (-0.5)
+        )
+
+    def zero_grad(self):
+        self.optimizer_decoder.zero_grad()
+        self.optimizer_encoder.zero_grad()
+
+    def step(self):
+        self._step += 1
+        for stack, optimizer in self.optimizers.items():
+            new_rate = self._update_rate(stack)
+            for param_group in self.optimizer:
+                param_group["lr"] = new_rate
+            optimizer.step()
+
+
 # ------------
 # Train
 # ------------
@@ -350,14 +408,12 @@ def evaluate(args, model, tokenizer, prefix=""):
         labels_tgt.to(args.device)
 
         with torch.no_grad():
-            outputs = (
-                model(
-                    source,
-                    target,
-                    decoder_encoder_attention_mask=labels_src,
-                    decoder_attention_mask=labels_tgt,
-                    decoder_lm_labels=labels_tgt,
-                )
+            outputs = model(
+                source,
+                target,
+                decoder_encoder_attention_mask=labels_src,
+                decoder_attention_mask=labels_tgt,
+                decoder_lm_labels=labels_tgt,
             )
             lm_loss = outputs[0]
             eval_loss += lm_loss.mean().item()
