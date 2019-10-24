@@ -200,6 +200,24 @@ def load_and_cache_examples(args, tokenizer):
     return dataset
 
 
+def compute_token_type_embedding(sequence, separator="[CLS]"):
+    """ Segment embeddings as described in [1]
+
+    The values {0,1} were obtained from the repository [2].
+
+    [1] Liu, Yang, and Mirella Lapata. "Text summarization with pretrained encoders."
+        arXiv preprint arXiv:1908.08345 (2019).
+    [2] https://github.com/nlpyang/PreSumm (/src/prepro/data_builder.py, commit fac1217)
+    """
+    embeddings = []
+    sentence_num = 0
+    for s in sequence:
+        if s == separator:
+            sentence_num += 1
+        embeddings.append(sentence_num % 2)
+    return embeddings
+
+
 # ------------
 # Train
 # ------------
@@ -231,31 +249,7 @@ def train(args, model, tokenizer):
         )
 
     # Prepare the optimizer and schedule (linear warmup and decay)
-    no_decay = ["bias", "LayerNorm.weight"]
-    optimizer_grouped_parameters = [
-        {
-            "params": [
-                p
-                for n, p in model.named_parameters()
-                if not any(nd in n for nd in no_decay)
-            ],
-            "weight_decay": args.weight_decay,
-        },
-        {
-            "params": [
-                p
-                for n, p in model.named_parameters()
-                if any(nd in n for nd in no_decay)
-            ],
-            "weight_decay": 0.0,
-        },
-    ]
-    optimizer = AdamW(
-        optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon
-    )
-    scheduler = WarmupLinearSchedule(
-        optimizer, warmup_steps=args.warmup_steps, t_total=t_total
-    )
+    optimizer, scheduler = BertSumOptimizer(model)
 
     # Train
     logger.info("***** Running training *****")
@@ -281,7 +275,7 @@ def train(args, model, tokenizer):
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=True)
         for step, batch in enumerate(epoch_iterator):
             # load the data on device
-            source, target = batch
+            source, target, token_type_embedding = batch
             labels_src = mask_padding_tokens(source)
             labels_tgt = mask_padding_tokens(target)
             source.to(args.device)
