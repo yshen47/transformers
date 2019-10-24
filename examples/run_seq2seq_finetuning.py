@@ -306,8 +306,10 @@ def train(args, model, tokenizer):
             * args.num_train_epochs
         )
 
-    # Prepare the optimizer and schedule (linear warmup and decay)
-    optimizer, scheduler = BertSumOptimizer(model)
+    # Prepare the optimizer
+    lr = {"encoder": 2e-3, "decoder": 0.1}
+    warmup_steps = {"encoder": 20000, "decoder": 10000}
+    optimizer = BertSumOptimizer(model, lr, warmup_steps)
 
     # Train
     logger.info("***** Running training *****")
