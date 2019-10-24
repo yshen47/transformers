@@ -76,12 +76,12 @@ class ModelWithBeamSearch(object):
         for step in range(self.max_length):
             decoder_input = growing_sequence[:, -1]
             outputs = self.decoder(decoder_input, kwargs_decoder)
-            log_probabilities = outputs[1]
+            log_probabilities = torch.nn.functional.log_softmax(outputs[1])
             vocab_size = log_probabilities.size(-1)
 
             # Multiply each beam probability with the probability of the
             # next token (conditioned on the words in the beam).
-            log_probabilities += topk_log_probabilities.view()
+            log_probabilities += topk_log_probabilities.view(-1, 1)
 
             # if the beam has not attained the minimum required length we
             # make the end token arbitrarily unlikely.
@@ -92,40 +92,40 @@ class ModelWithBeamSearch(object):
 
             # Find the `beam_size` (previous_beam + token) combinations with
             # the highest score
-            log_probabilities = log_probabilities.reshape(
-                -1, self.beam_size * vocab_size
-            )
             topk_log_probabilities, topk_ids = log_probabilities.topk(
-                self.beam_size, dim=-1
+                log_probabilities.view(-1, self.beam_size * vocab_size),
+                self.beam_size,
+                dim=-1
             )
 
-            # Length penalty. The +1 accounts for the [EOS] token
+            # Apply the length penalty. The +1 accounts for the [EOS] token
             # that will be added if the beam ends.
             length_penalty = ((5.0 + (step + 1)) / 6.0) ** self.alpha
-            topk_scores = log_probabilities / length_penalty
+            topk_scores = topk_log_probabilities / length_penalty
 
             # Retrieve the corresponding respective beam and token id
             # topk_token_ids[i] will be added to topk_beam_ids[i]
-            topk_beam_ids = topk_ids.div(self.beam_size)
+            topk_beam_ids = topk_ids.div(vocab_size)
             topk_token_ids = topk_ids.fmod(vocab_size)
 
-            # Retrieve the index of the concerned beams in the original
-            # log_probabilities tensor
-            batch_index = (
-                topk_beam_ids + beam_offset[: topk_beam_ids.size(0).unsqueeze(1)]
-            )
-            select_indices = batch_index.view(-1)
+            # Retrieve the row index of the surviving beams in the original
+            # view of the log_probabilities tensor
+            surviving_beams_rows = (
+                topk_beam_ids + beam_offset[: topk_beam_ids.size(0)].view(-1, 1)
+            ).view(-1)
 
             # Append the last predictions
             growing_sequence = torch.cat(
                 [
-                    growing_sequence.index_select(0, select_indices),
+                    growing_sequence.index_select(0, surviving_beams_rows),
                     topk_token_ids.view(-1, 1),
                 ],
-                -1,
+                1,
             )
 
-            # Check if any of the beam searches has ended
+            # Check if any of the beam searches has ended during this
+            # growth step. Also if top beam (most probable) has ended
+            # for one element of the batch.
             is_finished = topk_token_ids.eq(self.end_token)
             if step + 1 == self.max_length:
                 is_finished.fill_(1)
@@ -135,26 +135,29 @@ class ModelWithBeamSearch(object):
             if is_finished.any():
                 predictions = growing_sequence.view(-1, self.beam_size, growing_sequence.size(-1))
                 for i in range(is_finished.size(0)):
-                    b = batch_offset[i]
                     if is_top_beam_finished[i]:
                         is_finished[i].fill_(1)
                     finished_hyp = is_finished[i].nonzero().view(-1)
+
                     # Store finished hypotheses for this batch.
+                    b = batch_offset[i]
                     for j in finished_hyp:
-                        hypotheses[b].append((topk_scores[i, j], predictions[i, j, 1:]))
-                    # If the batch reached the end, save the best hypotheses.
+                        hypotheses[b].append((topk_scores[i, j], predictions[i, j, :]))
+
+                    # If the batch reached the end, save the best hypotheses
+                    # in terms of length-penalized score.
                     if is_top_beam_finished[i]:
                         best_hyp = sorted(
                             hypotheses[b], key=lambda x: x[0], reverse=True
                         )
-                        score, pred = best_hyp[0]
+                        best_score, best_prediction = best_hyp[0]
+                        results["scores"][b].append(best_score)
+                        results["predictions"][b].append(best_prediction)
 
-                        results["scores"][b].append(score)
-                        results["predictions"][b].append(pred)
                 non_finished = is_top_beam_finished.eq(0).nonzero().view(-1)
-                # If all sentences are translated, no need to go further.
                 if len(non_finished) == 0:
                     break
+
                 # Remove finished batches for the next step.
                 topk_log_probabilities = topk_log_probabilities.index_select(0, non_finished)
                 batch_index = batch_index.index_select(0, non_finished)
