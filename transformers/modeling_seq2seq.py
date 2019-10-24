@@ -113,7 +113,7 @@ class PreTrainedSeq2seq(nn.Module):
             if not argument.startswith("decoder_")
         }
         kwargs_decoder = {
-            argument.replace("decoder_", ""): value
+            argument[len("decoder_"):]: value
             for argument, value in kwargs.items()
             if argument.startswith("decoder_")
         }
@@ -171,7 +171,7 @@ class PreTrainedSeq2seq(nn.Module):
             if not argument.startswith("decoder_")
         }
         kwargs_decoder = {
-            argument.replace("decoder_", ""): value
+            argument[len("decoder_"):]: value
             for argument, value in kwargs.items()
             if argument.startswith("decoder_")
         }
